@@ -1,0 +1,200 @@
+---
+title: "Single sample gene set enrichment analysis"
+author: "Menna Arafat"
+date:  "2024-8-25"
+output: html_document
+Main_tutorial: https://www.bioconductor.org/packages/release/bioc/vignettes/GSVA/inst/doc/GSVA.html#:~:text=Gene%20set%20variation%20analysis%20(GSVA,from%20genes%20to%20gene%20sets.
+---
+
+
+
+## create output directory
+
+```{r}
+
+dir.create("output")
+```
+
+## BiocManager::install("fields")
+
+```{r}
+ suppressPackageStartupMessages({ 
+library("GSVAdata")
+library(MOFA2)   
+library("GSVA")
+library(GSEABase)
+library(GSVAdata)
+library(fgsea)
+library(tibble)
+library("RColorBrewer")
+library("circlize")
+library(ComplexHeatmap)
+library(biomaRt)
+library(dplyr)
+library(plyr)
+library(limma)
+library(fields)
+ })
+```
+
+## load your gmt as gene set (list of vectors)
+
+```{r}
+
+gset = gmtPathways("data/Human_GO_AllPathways_main.gmt.txt")
+```
+
+## filter gene set to have at least 5 terms pr set
+
+```{r}
+gset_sub= gset[lapply(gset, length) >= 5]
+
+gset_main= gset_sub[!grepl("PMC",names(gset_sub))]
+
+```
+
+##  convert list to long formats for clusterprofiler
+
+```{r}
+gmt_long= stack(gset_sub) 
+gmt_long= gmt_long[,c(2,1)] 
+```
+
+## load data
+
+```{r}
+list.files()
+data= read.csv("data/Final.DataSet.csv") 
+metadata= data.frame(sample= colnames(data)[-1],
+                     condition= as.character(data[1,-1]))
+data= data[-1,]
+```
+
+## change type
+
+```{r}
+data[,-1]= lapply(data[,-1], function(x) as.numeric(as.character(x))) 
+sum(is.na(data))
+str(data)
+```
+
+## id mapping
+
+```{r}
+list.files()
+mapping= read.delim("data/idmapping.tsv" )
+data$id= mapping$To[match(data$Sample, mapping$From)]
+length(unique(data$id))
+```
+
+## remove duplicate ids
+
+```{r}
+data= data %>% mutate(mean= rowSums(dplyr::select(.,where(is.numeric)))/ncol(data)-2) %>% 
+                         group_by(id) %>%
+                         dplyr::slice(which.max(mean)) %>% 
+                         ungroup() %>% dplyr::select(-c(mean, Sample)) %>% 
+                         filter(!is.na(id)) %>% as.data.frame()
+row.names(data)= data$id
+data= data[,!grepl("id", colnames(data))]
+head(data)
+```
+
+## determine the distribution of data usually gaussian for log transformed data, and poisson for FPKM count data
+
+```{r}
+general_mean= apply(data, 1, mean)
+hist(general_mean, main = "Histogram of Data", xlab = "Values", breaks = 30)
+```
+
+## check whether it follows gaussian distribution 
+
+```{r}
+qqnorm(general_mean)
+```
+
+## check normality
+
+```{r}
+shapiro.test(general_mean)
+```
+
+## log transform
+
+```{r}
+data.log= log(data, base=2)
+```
+
+## check normality
+
+```{r}
+general_mean= apply(data.log, 1, mean)
+shapiro.test(general_mean)
+```
+
+
+## check whether it follows poisson distribution 
+
+```{r}
+general_mean =apply(data.log, 1, mean) #' ## general_mean=lambda
+poisson_quantiles = qpois(ppoints(length(general_mean)), lambda = general_mean)  #' ##  Theoretical quantiles, #' ## propability density function of poisson model probability distribution that models the number of times an event happens in a fixed interval of time or space given the average rate is constant, quantile function is essentially the inverse of this CDF, as it finds the k events corresponding to a specific cumulative probability
+```
+
+## plot the empirical quantiles against the theoretical quantiles.
+
+```{r}
+qqplot(poisson_quantiles, sort(general_mean), 
+       main = "Q-Q Plot for Poisson Distribution",
+       xlab = "Theoretical Quantiles (Poisson)",
+       ylab = "Empirical Quantiles (Data)")
+```
+
+## run ssgsea
+### we could set the distribution of the data throught the parameter kcdf = c("auto", "Gaussian", "Poisson"), for kcdf="auto", this will make GSVA to decide automatically the distribution
+
+```{r}
+gsva_obj = gsvaParam(as.matrix(data),
+                      gset_sub, minSize=1, maxSize=500,
+                      kcdf="auto")
+ES = gsva(gsva_obj)
+write.csv(ES, "output/single_sample_gsea_enrichment_scores.csv", row.names = T)
+```
+## heatmap
+```{r}
+
+shapiro.test(as.numeric(ES[1, ]))  #' ## p-value <= 0.05 indicative of non normal distribution 
+shapiro.test(as.numeric(ES[, 1])) 
+
+colorLegend <- c("darkolivegreen" ,"#ADFF2F" )
+names(colorLegend) <- unique(metadata$condition)
+sample.color.map = colorLegend[metadata$condition]
+names(sample.color.map) <- metadata$sample
+
+sampleClustering <- hclust(as.dist(1-cor(as.matrix(ES), method="spearman")), #' ## pearson #' ## spearman
+                           method="complete")
+geneSetClustering <- hclust(as.dist(1-cor(t(ES), method="spearman")),
+                            method="complete")
+palette <- colorRampPalette(c( "lightyellow2" ,"#DFC27D" , "#FCAA0FFF", "darkred"))(256)
+
+png("output/heatmap_pathsway_signature_ssgsea.png", height=4100, width = 2650, res= 600)
+heatmap(as.matrix(ES), ColSideColors=sample.color.map, xlab="samples",
+        ylab="", margins=c(2, 20),
+        col = palette ,
+        labRow=substr(gsub("_", " ", gsub("^KEGG_|^REACTOME_|^BIOCARTA_", "", rownames(ES))), 1, 35),
+        labCol="", scale="none", Colv=as.dendrogram(sampleClustering),
+        Rowv=as.dendrogram(geneSetClustering)
+         )
+legend("right", inset = 0.001, names(colorLegend), fill=colorLegend, bg="white",
+       cex = .6, title= "Phases") #' ##  #' ## x = .01, y =9
+image.plot(zlim = range(ES, na.rm = TRUE),
+           legend.only = TRUE, 
+           horizontal = TRUE, 
+           legend.shrink = 0.3, 
+           legend.width = 0.9,
+           legend.mar= 4.5,
+           col = palette , 
+           legend.position = c(0.5, 0.5), 
+           inset = c(-1.1, 0),
+           legend.args = list(text = "Enrichment Score (ES)", side = 3, line = .5, cex = 0.6))
+dev.off()
+```
